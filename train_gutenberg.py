@@ -55,13 +55,14 @@ def train_model_simple(model, optimizer, device, n_epochs,
                        eval_freq, eval_iter, print_sample_iter, start_context,
                        output_dir, save_ckpt_freq, tokenizer, initial_lr=3e-05,
                        min_lr=1e-6,batch_size=1024, train_ratio=0.90, global_step=-1,
-                       trained_epochs_so_far=0, warmup_steps=None,  total_training_steps=None):
+                       trained_epochs_so_far=0, warmup_steps=None, total_training_steps=None):
 
     train_losses, val_losses, track_tokens_seen, track_lrs = [], [], [], []
     tokens_seen = 0
 
     # Retrieve the maximum learning rate from the optimizer
     peak_lr = optimizer.param_groups[0]["lr"]
+    wandb.watch(model, log="all", log_freq=eval_freq)
 
     start_time = time.time()
 
@@ -87,7 +88,7 @@ def train_model_simple(model, optimizer, device, n_epochs,
                 if warmup_steps is None:
                     # Calculate the total number of iterations in the training process
                     total_training_steps = len(train_loader) * n_epochs * len(all_files)
-                    warmup_steps = int(total_training_steps * 0.19)
+                    warmup_steps = int(total_training_steps * 0.15)
 
                     wandb.config.update({"warmup steps": warmup_steps})
                     wandb.config.update({"total_training_steps": total_training_steps})
@@ -125,16 +126,6 @@ def train_model_simple(model, optimizer, device, n_epochs,
 
                     optimizer.step()
                     tokens_seen += input_batch.numel()
-
-                    # Adjust the learning rate based on the current phase (warmup or cosine annealing)
-                    if global_step < warmup_steps:
-                        # Linear warmup
-                        lr = initial_lr + global_step * lr_increment
-                    else:
-                        # Cosine annealing after warmup
-                        progress = ((global_step - warmup_steps) /
-                                    (total_training_steps - warmup_steps))
-                        lr = min_lr + (peak_lr - min_lr) * 0.5 * (1 + math.cos(math.pi * progress))
 
                     # Optional evaluation step
                     if global_step % eval_freq == 0:
@@ -220,7 +211,7 @@ if __name__ == "__main__":
                         help='Frequency of evaluations during training')
     parser.add_argument('--save_ckpt_freq', type=int, default=100_000,
                         help='Frequency of saving model checkpoints during training')
-    parser.add_argument('--lr', type=float, default=5e-4,
+    parser.add_argument('--lr', type=float, default=1e-4,
                         help='Learning rate for the optimizer')
     parser.add_argument('--batch_size', type=int, default=4,
                         help='Batch size for training')
@@ -246,11 +237,11 @@ if __name__ == "__main__":
     if args.debug:
         GPT_CONFIG_355M = {
             "vocab_size": 50257,     # Vocabulary size
-            "context_length": 10,    # Context length
-            "emb_dim": 12,           # Embedding dimension
-            "n_heads": 2,            # Number of attention heads
-            "n_layers": 2,           # Number of layers
-            "drop_rate": 0.0,        # Dropout rate, deactivated via 0.0 as dropout in LLMs is not recommended anymore
+            "context_length": 1024,    # Context length
+            "emb_dim": 768,           # Embedding dimension
+            "n_heads": 12,            # Number of attention heads
+            "n_layers": 12,           # Number of layers
+            "drop_rate": 0.1,        # Dropout rate, deactivated via 0.0 as dropout in LLMs is not recommended anymore
             "qkv_bias": False        # Query-key-value bias
         }
 
@@ -271,7 +262,20 @@ if __name__ == "__main__":
     torch.manual_seed(123)
     model = GPTModel(GPT_CONFIG_355M)
     model.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.1)
+
+    params_with_decay = []
+    params_without_decay = []
+
+    for name, param in model.named_parameters():
+        if param.ndim >= 2:  # Apply weight decay only to parameters with dimension >= 2
+            params_with_decay.append(param)
+        else:
+            params_without_decay.append(param)
+
+    param_groups = [{'params': params_with_decay, 'weight_decay': 0.1},
+                    {'params': params_without_decay, 'weight_decay': 0.0}]
+
+    optimizer = torch.optim.AdamW(param_groups, lr=args.lr)
     tokenizer = tiktoken.get_encoding("gpt2")
 
     global_step = -1
